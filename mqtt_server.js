@@ -1,43 +1,59 @@
-// Simple MQTT broker with HTTP helper API using Aedes + Express
-// Run: npm i aedes express body-parser
+// MQTT broker (Aedes) + API HTTP + UI températures
+// Optimisé BeagleBone: historique par jour (pas de scan du gros NDJSON)
 
 const aedes = require('aedes')();
 const net = require('net');
 const express = require('express');
 const bodyParser = require('body-parser');
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
 
 const MQTT_PORT = process.env.MQTT_PORT ? parseInt(process.env.MQTT_PORT, 10) : 1883;
 const HTTP_PORT = process.env.HTTP_PORT ? parseInt(process.env.HTTP_PORT, 10) : 3000;
 
-// Stockage en mémoire des dernières valeurs de capteurs
-// Format: { "A1B2C3": { value: 22.5, time: timestamp }, ... }
-let sensorsState = {};
-const fs = require('fs');
-const path = require('path');
+const logsDir = path.join(__dirname, 'logs');
+const historyDir = path.join(logsDir, 'history');
+const sensorsStatePath = path.join(logsDir, 'sensors_state.json');
+const sensorsDailyPath = path.join(logsDir, 'sensors_daily.json');
 
-const sensorsStatePath = path.join(__dirname, 'logs/sensors_state.json');
-// Historique en append (1 JSON par ligne = NDJSON)
-const sensorsHistoryPath = path.join(__dirname, 'logs/sensors_history.ndjson');
-// Assure que le dossier logs existe (sinon writeFileSync échoue)
+let sensorsState = {};
+/** @type {Record<string, Record<string, { sum: number, n: number, avg: number }>>} */
+let sensorsDaily = {};
+
 try {
-  fs.mkdirSync(path.dirname(sensorsStatePath), { recursive: true });
+  fs.mkdirSync(historyDir, { recursive: true });
 } catch (e) {
-  console.error('[SENSOR] Erreur création dossier logs:', e && e.message ? e.message : e);
+  console.error('[SENSOR] Erreur création logs:', e && e.message ? e.message : e);
 }
+
 if (fs.existsSync(sensorsStatePath)) {
   try {
     sensorsState = JSON.parse(fs.readFileSync(sensorsStatePath, 'utf8'));
   } catch (e) {
-    console.error('[SENSOR] Erreur lecture/parsing sensors_state.json, reset:', e.message);
+    console.error('[SENSOR] Erreur sensors_state.json:', e.message);
     sensorsState = {};
   }
 }
 
+if (fs.existsSync(sensorsDailyPath)) {
+  try {
+    sensorsDaily = JSON.parse(fs.readFileSync(sensorsDailyPath, 'utf8'));
+  } catch (e) {
+    console.error('[SENSOR] Erreur sensors_daily.json:', e.message);
+    sensorsDaily = {};
+  }
+}
 
-// TCP MQTT server
+// --- MQTT ---
 const mqttServer = net.createServer(aedes.handle);
 mqttServer.on('error', (err) => {
-  console.error('[MQTT] TCP server error:', err);
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`[MQTT] port ${MQTT_PORT} déjà utilisé — arrête l'ancienne instance puis relance.`);
+  } else {
+    console.error('[MQTT] TCP server error:', err);
+  }
+  process.exit(1);
 });
 mqttServer.listen(MQTT_PORT, '0.0.0.0', function () {
   console.log(`[MQTT] broker listening on 0.0.0.0:${MQTT_PORT}`);
@@ -46,66 +62,93 @@ mqttServer.listen(MQTT_PORT, '0.0.0.0', function () {
 aedes.on('client', function (client) {
   console.log(`[MQTT] client connected: ${client ? client.id : 'unknown'}`);
 });
-
 aedes.on('clientDisconnect', function (client) {
   console.log(`[MQTT] client disconnected: ${client ? client.id : 'unknown'}`);
 });
-
-// Extra diagnostics
 aedes.on('clientError', function (client, err) {
   console.error(`[MQTT] client error (${client ? client.id : 'unknown'}):`, err && err.message ? err.message : err);
 });
-
 aedes.on('connectionError', function (client, err) {
   console.error(`[MQTT] connection error (${client ? client.id : 'unknown'}):`, err && err.message ? err.message : err);
 });
 
-aedes.on('publish', function (packet, client) {
-  if (client) {
-    const topic = packet.topic;
-    const payloadStr = packet.payload.toString();
-    
-    // Log générique
-    console.log(`[MQTT] ${client.id} -> ${topic}: ${payloadStr}`);
+// --- Persistance légère (async + debounce) ---
+let stateDirty = false;
+let dailyDirty = false;
+let persistTimer = null;
 
-    // Traitement spécifique pour les capteurs de température
-    // Topic attendu: sensor/temp/XXXXXX
-    if (topic.startsWith('sensor/temp/')) {
-      try {
-        const data = JSON.parse(payloadStr);
-        // L'ID est la dernière partie du topic (ou présent dans le JSON)
-        const deviceId = topic.split('/').pop(); 
-        
-        if (data.value !== null && data.value !== undefined) {
-          const reading = {
-            value: data.value,
-            unit: data.unit || 'C',
-            lastUpdate: new Date().toISOString()
-          };
-          sensorsState[deviceId] = reading;
-          console.log(`[SENSOR] Mise à jour ${deviceId} : ${reading.value}°${reading.unit}`);
-          try {
-            // Snapshot JSON lisible (overwrite)
-            fs.writeFileSync(sensorsStatePath, JSON.stringify(sensorsState, null, 2));
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
 
-            // Historique append (NDJSON): une mesure par ligne
-            const event = {
-              deviceId,
-              ...reading
-            };
-            fs.writeFileSync(sensorsHistoryPath, `${JSON.stringify(event)}\n`, { flag: 'a' });
-          } catch (e) {
-            console.error('[SENSOR] Erreur writing to file:', e.message);
-          }
-        }
-      } catch (e) {
-        console.error('[SENSOR] Erreur parsing JSON:', e.message);
-      }
+function localDayKey(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function dayFilePath(dayKey) {
+  return path.join(historyDir, `${dayKey}.ndjson`);
+}
+
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(function () {
+    persistTimer = null;
+    if (stateDirty) {
+      stateDirty = false;
+      fs.writeFile(sensorsStatePath, JSON.stringify(sensorsState), function (err) {
+        if (err) console.error('[SENSOR] write state:', err.message);
+      });
     }
+    if (dailyDirty) {
+      dailyDirty = false;
+      fs.writeFile(sensorsDailyPath, JSON.stringify(sensorsDaily), function (err) {
+        if (err) console.error('[SENSOR] write daily:', err.message);
+      });
+    }
+  }, 5000);
+}
+
+function recordReading(deviceId, value, unit) {
+  const lastUpdate = new Date().toISOString();
+  const t = Date.parse(lastUpdate);
+  const reading = { value, unit: unit || 'C', lastUpdate };
+  sensorsState[deviceId] = reading;
+  stateDirty = true;
+
+  const day = localDayKey(t);
+  if (!sensorsDaily[day]) sensorsDaily[day] = {};
+  if (!sensorsDaily[day][deviceId]) sensorsDaily[day][deviceId] = { sum: 0, n: 0, avg: 0 };
+  const acc = sensorsDaily[day][deviceId];
+  acc.sum += Number(value);
+  acc.n += 1;
+  acc.avg = Math.round((acc.sum / acc.n) * 100) / 100;
+  dailyDirty = true;
+
+  const event = { deviceId, value: reading.value, unit: reading.unit, lastUpdate };
+  fs.appendFile(dayFilePath(day), `${JSON.stringify(event)}\n`, function (err) {
+    if (err) console.error('[SENSOR] append history:', err.message);
+  });
+
+  schedulePersist();
+}
+
+aedes.on('publish', function (packet, client) {
+  if (!client) return;
+  const topic = packet.topic;
+  if (!topic.startsWith('sensor/temp/')) return;
+
+  try {
+    const data = JSON.parse(packet.payload.toString());
+    const deviceId = topic.split('/').pop();
+    if (data.value === null || data.value === undefined) return;
+    recordReading(deviceId, data.value, data.unit || 'C');
+  } catch (e) {
+    console.error('[SENSOR] Erreur parsing JSON:', e.message);
   }
 });
 
-// HTTP helper API to publish messages easily from shell/curl
+// --- HTTP ---
 const app = express();
 app.use(bodyParser.json());
 
@@ -113,7 +156,6 @@ function normalizeHexColor(input) {
   if (typeof input !== 'string') return null;
   let c = input.trim().toUpperCase();
   if (c.startsWith('#')) c = c.slice(1);
-  // allow 6 hex chars only
   const hex6 = /^[0-9A-F]{6}$/;
   if (!hex6.test(c)) return null;
   return `#${c}`;
@@ -132,7 +174,7 @@ const RANGE_MS = {
   '1m': 30 * 24 * 60 * 60 * 1000,
   '3m': 90 * 24 * 60 * 60 * 1000
 };
-const HISTORY_MAX_POINTS = 400;
+const HISTORY_MAX_POINTS = 300;
 const HISTORY_MAX_DAYS = 366;
 
 function downsamplePoints(points, maxPoints) {
@@ -160,21 +202,12 @@ function downsamplePoints(points, maxPoints) {
   return out;
 }
 
-function pad2(n) {
-  return String(n).padStart(2, '0');
-}
-
-function localDayKey(t) {
-  const d = new Date(t);
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
 function resolveHistoryWindow(req) {
   const daysRaw = req.query.days;
   if (daysRaw !== undefined && daysRaw !== null && String(daysRaw).trim() !== '') {
     const days = clampInt(daysRaw, 1, HISTORY_MAX_DAYS, NaN);
     if (!Number.isFinite(days)) return { error: `invalid days (1-${HISTORY_MAX_DAYS})` };
-    return { rangeMs: days * 24 * 60 * 60 * 1000, range: `${days}d`, days };
+    return { rangeMs: days * 24 * 60 * 60 * 1000, label: `${days}d`, days };
   }
   const range = typeof req.query.range === 'string' ? req.query.range : '1d';
   const rangeMs = RANGE_MS[range];
@@ -186,24 +219,33 @@ function resolveHistoryWindow(req) {
 
 function parseDeviceFilter(req) {
   const raw = typeof req.query.deviceId === 'string' ? req.query.deviceId : '';
-  if (!raw || raw === 'all') return null; // tous les capteurs
+  if (!raw || raw === 'all') return null;
   const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
   return ids.length ? new Set(ids) : null;
 }
 
-/** Lit le NDJSON une fois: séries + moyennes journalières */
-function readHistoryBundle(deviceFilter, sinceMs) {
-  return new Promise(function (resolve, reject) {
-    if (!fs.existsSync(sensorsHistoryPath)) {
-      resolve({ byDevice: {}, dailyAcc: {} });
+function eachDayKey(fromMs, toMs) {
+  const keys = [];
+  const d = new Date(fromMs);
+  d.setHours(0, 0, 0, 0);
+  const end = new Date(toMs);
+  end.setHours(23, 59, 59, 999);
+  while (d.getTime() <= end.getTime()) {
+    keys.push(localDayKey(d.getTime()));
+    d.setDate(d.getDate() + 1);
+  }
+  return keys;
+}
+
+function readDayFile(dayKey, deviceFilter, sinceMs, untilMs, byDevice) {
+  return new Promise(function (resolve) {
+    const file = dayFilePath(dayKey);
+    if (!fs.existsSync(file)) {
+      resolve();
       return;
     }
-    /** @type {Record<string, { t: number, v: number }[]>} */
-    const byDevice = {};
-    /** @type {Record<string, Record<string, { sum: number, n: number }>>} */
-    const dailyAcc = {};
-    const stream = fs.createReadStream(sensorsHistoryPath, { encoding: 'utf8' });
-    const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
+    const stream = fs.createReadStream(file, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
     rl.on('line', function (line) {
       if (!line) return;
       try {
@@ -212,54 +254,63 @@ function readHistoryBundle(deviceFilter, sinceMs) {
         if (!deviceId) return;
         if (deviceFilter && !deviceFilter.has(deviceId)) return;
         const t = Date.parse(row.lastUpdate);
-        if (!Number.isFinite(t) || t < sinceMs) return;
+        if (!Number.isFinite(t) || t < sinceMs || t > untilMs) return;
         if (row.value === null || row.value === undefined) return;
         const v = Number(row.value);
         if (!Number.isFinite(v)) return;
-
         if (!byDevice[deviceId]) byDevice[deviceId] = [];
         byDevice[deviceId].push({ t, v });
-
-        const day = localDayKey(t);
-        if (!dailyAcc[day]) dailyAcc[day] = {};
-        if (!dailyAcc[day][deviceId]) dailyAcc[day][deviceId] = { sum: 0, n: 0 };
-        dailyAcc[day][deviceId].sum += v;
-        dailyAcc[day][deviceId].n += 1;
       } catch (_) {
-        // ligne corrompue: ignore
+        // ignore
       }
     });
     rl.on('close', function () {
-      resolve({ byDevice, dailyAcc });
+      resolve();
     });
-    rl.on('error', reject);
-    stream.on('error', reject);
+    rl.on('error', function () {
+      resolve();
+    });
+    stream.on('error', function () {
+      resolve();
+    });
   });
 }
 
-function buildDailyRows(dailyAcc) {
-  return Object.keys(dailyAcc)
-    .sort(function (a, b) {
-      return a < b ? 1 : a > b ? -1 : 0;
-    })
-    .map(function (date) {
-      const averages = {};
-      const devices = dailyAcc[date];
-      for (const id of Object.keys(devices)) {
-        const { sum, n } = devices[id];
-        averages[id] = Math.round((sum / n) * 100) / 100;
-      }
-      return { date, averages };
-    });
+async function readHistoryFromDayFiles(deviceFilter, fromMs, toMs) {
+  const byDevice = {};
+  const days = eachDayKey(fromMs, toMs);
+  // Séquentiel: plus doux pour la BBB (évite de saturer disque/CPU)
+  for (const day of days) {
+    await readDayFile(day, deviceFilter, fromMs, toMs, byDevice);
+  }
+  return byDevice;
 }
 
-// Dernières valeurs connues
+function buildDailyRowsFromCache(fromMs, toMs, deviceFilter) {
+  const fromDay = localDayKey(fromMs);
+  const toDay = localDayKey(toMs);
+  const rows = [];
+  for (const date of Object.keys(sensorsDaily)) {
+    if (date < fromDay || date > toDay) continue;
+    const averages = {};
+    const devices = sensorsDaily[date] || {};
+    for (const id of Object.keys(devices)) {
+      if (deviceFilter && !deviceFilter.has(id)) continue;
+      averages[id] = devices[id].avg;
+    }
+    if (Object.keys(averages).length) rows.push({ date, averages });
+  }
+  rows.sort(function (a, b) {
+    return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
+  });
+  return rows;
+}
+
 app.get('/temperatures', function (req, res) {
   res.json(sensorsState);
 });
 
-// Historique: ?range=1h|1d|1w|1m|3m  OU  ?days=N
-// deviceId=id  |  deviceId=id1,id2  |  deviceId=all
+// Historique léger: lit seulement logs/history/YYYY-MM-DD.ndjson
 app.get('/temperatures/history', async function (req, res) {
   const window = resolveHistoryWindow(req);
   if (window.error) return res.status(400).json({ error: window.error });
@@ -269,7 +320,7 @@ app.get('/temperatures/history', async function (req, res) {
   const from = to - window.rangeMs;
 
   try {
-    const { byDevice, dailyAcc } = await readHistoryBundle(deviceFilter, from);
+    const byDevice = await readHistoryFromDayFiles(deviceFilter, from, to);
     const series = {};
     for (const id of Object.keys(byDevice)) {
       series[id] = downsamplePoints(byDevice[id], HISTORY_MAX_POINTS);
@@ -280,7 +331,7 @@ app.get('/temperatures/history', async function (req, res) {
       from: new Date(from).toISOString(),
       to: new Date(to).toISOString(),
       series,
-      daily: buildDailyRows(dailyAcc)
+      daily: buildDailyRowsFromCache(from, to, deviceFilter)
     });
   } catch (e) {
     console.error('[SENSOR] history read error:', e && e.message ? e.message : e);
@@ -288,8 +339,6 @@ app.get('/temperatures/history', async function (req, res) {
   }
 });
 
-// Unified command endpoints
-// Message command: { mode: "messages", text: string, color?: "#RRGGBB", brightness?: 0-255, speed?: ms }
 app.post('/message_cmd', function (req, res) {
   const body = req.body || {};
   const text = typeof body.text === 'string' ? body.text : '';
@@ -310,7 +359,6 @@ app.post('/message_cmd', function (req, res) {
   });
 });
 
-// Conway command: { mode: "conway", color?: "#RRGGBB", brightness?: 0-255, refreshMs?: ms }
 app.post('/conway_cmd', function (req, res) {
   const body = req.body || {};
   const color = normalizeHexColor(body.color || '#66CCFF') || '#66CCFF';
@@ -328,19 +376,25 @@ app.post('/conway_cmd', function (req, res) {
   });
 });
 
-// Frontend Svelte (build: npm run build --prefix web)
 const webDist = path.join(__dirname, 'web', 'dist');
 if (fs.existsSync(webDist)) {
   app.use(express.static(webDist));
-  // SPA fallback (après les routes API)
   app.get('*', function (req, res) {
     res.sendFile(path.join(webDist, 'index.html'));
   });
   console.log(`[HTTP] serving web UI from ${webDist}`);
 } else {
-  console.warn(`[HTTP] web UI not found (${webDist}). Run: npm run build --prefix web`);
+  console.warn(`[HTTP] web UI not found (${webDist}). Copie web/dist depuis le PC.`);
 }
 
-app.listen(HTTP_PORT, '0.0.0.0', function () {
+const httpServer = app.listen(HTTP_PORT, '0.0.0.0', function () {
   console.log(`[HTTP] listening on 0.0.0.0:${HTTP_PORT}`);
+});
+httpServer.on('error', function (err) {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`[HTTP] port ${HTTP_PORT} déjà utilisé — arrête l'ancienne instance puis relance.`);
+  } else {
+    console.error('[HTTP] server error:', err);
+  }
+  process.exit(1);
 });

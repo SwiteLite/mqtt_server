@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node mqtt_server.js",
     "build:web": "npm run build --prefix web",
-    "dev:web": "npm run dev --prefix web"
+    "dev:web": "npm run dev --prefix web",
+    "split-history": "node scripts/split_history.js"
   },
 
   "dependencies": {
