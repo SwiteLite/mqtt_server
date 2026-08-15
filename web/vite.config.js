@@ -1,13 +1,16 @@
 import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
-// Dev: proxy /temperatures vers Express (:3000)
-// Prod: build dans web/dist, servi par Express
+// Build sur PC (pas sur la BeagleBone — Vite est trop lourd pour elle).
+// Puis copier web/dist vers la carte, et lancer seulement: npm start
 export default defineConfig({
   plugins: [svelte()],
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
+    sourcemap: false,
+    reportCompressedSize: false,
+    target: 'es2019'
   },
   server: {
     proxy: {
