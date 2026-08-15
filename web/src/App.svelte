@@ -349,16 +349,37 @@
     requestAnimationFrame(() => renderPlot());
   }
 
+  /** Cache historique navigateur (évite de relire le disque BBB à chaque clic). */
+  const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
+  /** @type {Map<string, { at: number, json: any }>} */
+  const historyCache = new Map();
+
+  function historyCacheKey() {
+    const device = overlay ? 'all' : selectedId || '';
+    const win = rangeMode === 'custom' ? `d:${customDays}` : `r:${range}`;
+    return `${device}|${win}`;
+  }
+
+  function applyHistoryPayload(json) {
+    if (json.current) applyTemps(json.current);
+    series = json.series || {};
+    daily = Array.isArray(json.daily) ? json.daily : [];
+    const colSet = new Set();
+    for (const row of daily) {
+      for (const id of Object.keys(row.averages || {})) colSet.add(id);
+    }
+    dailyCols = [...colSet].sort();
+  }
+
   async function fetchCurrent() {
     loadingCurrent = true;
     try {
-      const res = await fetch('/api/temps', { cache: 'no-store' });
+      // /temperatures fonctionne chez toi ; /api/temps en secours
+      let res = await fetch('/temperatures', { cache: 'no-store' });
+      if (!res.ok) res = await fetch('/api/temps', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const ct = res.headers.get('content-type') || '';
-      if (!ct.includes('application/json')) {
-        throw new Error('Réponse non-JSON pour /api/temps (mauvais serveur / vieux dist ?)');
-      }
-      applyTemps(await res.json());
+      const data = await res.json();
+      applyTemps(data);
       if (!tempEntries.length) {
         error = 'Cache courant vide (sensors_state.json / MQTT)';
       }
@@ -380,7 +401,10 @@
     return q;
   }
 
-  async function fetchHistory() {
+  /**
+   * @param {boolean} [force=false] ignorer le cache et recharger depuis le serveur
+   */
+  async function fetchHistory(force = false) {
     if (loadingHistory) return;
     if (!overlay && !selectedId) {
       series = {};
@@ -389,24 +413,31 @@
       renderPlot();
       return;
     }
+
+    const key = historyCacheKey();
+    if (!force) {
+      const hit = historyCache.get(key);
+      if (hit && Date.now() - hit.at < HISTORY_CACHE_TTL_MS) {
+        applyHistoryPayload(hit.json);
+        await tick();
+        renderPlot();
+        return;
+      }
+    }
+
     loadingHistory = true;
     try {
       error = '';
-      const res = await fetch(`/api/temps/history?${historyQuery()}`, { cache: 'no-store' });
+      const q = historyQuery();
+      let res = await fetch(`/temperatures/history?${q}`, { cache: 'no-store' });
+      if (!res.ok) res = await fetch(`/api/temps/history?${q}`, { cache: 'no-store' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const json = await res.json();
-      // Les courantes voyagent aussi avec l'historique
-      if (json.current) applyTemps(json.current);
-      series = json.series || {};
-      daily = Array.isArray(json.daily) ? json.daily : [];
-      const colSet = new Set();
-      for (const row of daily) {
-        for (const id of Object.keys(row.averages || {})) colSet.add(id);
-      }
-      dailyCols = [...colSet].sort();
+      historyCache.set(key, { at: Date.now(), json });
+      applyHistoryPayload(json);
       await tick();
       renderPlot();
     } catch (e) {
@@ -438,16 +469,18 @@
 
   function setRange(id) {
     if (busy) return;
+    // Recliquer la même plage = forcer un rechargement
+    const same = rangeMode === 'preset' && range === id;
     rangeMode = 'preset';
     range = id;
-    fetchHistory();
+    fetchHistory(same);
   }
 
   function applyCustomDays() {
     if (busy) return;
     rangeMode = 'custom';
     customDays = Math.max(1, Math.min(366, Number(customDays) || 1));
-    fetchHistory();
+    fetchHistory(true);
   }
 
   onMount(() => {
@@ -593,7 +626,9 @@
       </button>
     </div>
 
-    <p class="chart-hint muted">Glisser pour zoomer · Double-clic : reset · Survol : les 2 températures</p>
+    <p class="chart-hint muted">
+      Glisser pour zoomer · Double-clic : reset · Plages en cache 5 min (recliquer la plage = recharger)
+    </p>
     <div class="hover-readout empty" bind:this={hoverEl}>
       <span class="muted">Passe le curseur sur le graphe pour voir l’heure et les températures.</span>
     </div>
