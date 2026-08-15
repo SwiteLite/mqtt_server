@@ -125,9 +125,167 @@ function clampInt(v, min, max, def) {
   return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-// --- NOUVELLE ROUTE : Récupérer les températures ---
+const RANGE_MS = {
+  '1h': 60 * 60 * 1000,
+  '1d': 24 * 60 * 60 * 1000,
+  '1w': 7 * 24 * 60 * 60 * 1000,
+  '1m': 30 * 24 * 60 * 60 * 1000,
+  '3m': 90 * 24 * 60 * 60 * 1000
+};
+const HISTORY_MAX_POINTS = 720;
+const HISTORY_MAX_DAYS = 366;
+
+function downsamplePoints(points, maxPoints) {
+  if (points.length <= maxPoints) return points;
+  const out = [];
+  const bucketSize = points.length / maxPoints;
+  for (let i = 0; i < maxPoints; i++) {
+    const start = Math.floor(i * bucketSize);
+    const end = Math.max(start + 1, Math.floor((i + 1) * bucketSize));
+    let sumV = 0;
+    let sumT = 0;
+    let n = 0;
+    for (let j = start; j < end && j < points.length; j++) {
+      sumV += points[j].v;
+      sumT += points[j].t;
+      n++;
+    }
+    if (n) {
+      out.push({
+        t: Math.round(sumT / n),
+        v: Math.round((sumV / n) * 100) / 100
+      });
+    }
+  }
+  return out;
+}
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function localDayKey(t) {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function resolveHistoryWindow(req) {
+  const daysRaw = req.query.days;
+  if (daysRaw !== undefined && daysRaw !== null && String(daysRaw).trim() !== '') {
+    const days = clampInt(daysRaw, 1, HISTORY_MAX_DAYS, NaN);
+    if (!Number.isFinite(days)) return { error: `invalid days (1-${HISTORY_MAX_DAYS})` };
+    return { rangeMs: days * 24 * 60 * 60 * 1000, range: `${days}d`, days };
+  }
+  const range = typeof req.query.range === 'string' ? req.query.range : '1d';
+  const rangeMs = RANGE_MS[range];
+  if (!rangeMs) {
+    return { error: 'invalid range (use 1h, 1d, 1w, 1m, 3m) or days=N' };
+  }
+  return { rangeMs, label: range, days: null };
+}
+
+function parseDeviceFilter(req) {
+  const raw = typeof req.query.deviceId === 'string' ? req.query.deviceId : '';
+  if (!raw || raw === 'all') return null; // tous les capteurs
+  const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length ? new Set(ids) : null;
+}
+
+/** Lit le NDJSON une fois: séries + moyennes journalières */
+function readHistoryBundle(deviceFilter, sinceMs) {
+  return new Promise(function (resolve, reject) {
+    if (!fs.existsSync(sensorsHistoryPath)) {
+      resolve({ byDevice: {}, dailyAcc: {} });
+      return;
+    }
+    /** @type {Record<string, { t: number, v: number }[]>} */
+    const byDevice = {};
+    /** @type {Record<string, Record<string, { sum: number, n: number }>>} */
+    const dailyAcc = {};
+    const stream = fs.createReadStream(sensorsHistoryPath, { encoding: 'utf8' });
+    const rl = require('readline').createInterface({ input: stream, crlfDelay: Infinity });
+    rl.on('line', function (line) {
+      if (!line) return;
+      try {
+        const row = JSON.parse(line);
+        const deviceId = row.deviceId;
+        if (!deviceId) return;
+        if (deviceFilter && !deviceFilter.has(deviceId)) return;
+        const t = Date.parse(row.lastUpdate);
+        if (!Number.isFinite(t) || t < sinceMs) return;
+        if (row.value === null || row.value === undefined) return;
+        const v = Number(row.value);
+        if (!Number.isFinite(v)) return;
+
+        if (!byDevice[deviceId]) byDevice[deviceId] = [];
+        byDevice[deviceId].push({ t, v });
+
+        const day = localDayKey(t);
+        if (!dailyAcc[day]) dailyAcc[day] = {};
+        if (!dailyAcc[day][deviceId]) dailyAcc[day][deviceId] = { sum: 0, n: 0 };
+        dailyAcc[day][deviceId].sum += v;
+        dailyAcc[day][deviceId].n += 1;
+      } catch (_) {
+        // ligne corrompue: ignore
+      }
+    });
+    rl.on('close', function () {
+      resolve({ byDevice, dailyAcc });
+    });
+    rl.on('error', reject);
+    stream.on('error', reject);
+  });
+}
+
+function buildDailyRows(dailyAcc) {
+  return Object.keys(dailyAcc)
+    .sort(function (a, b) {
+      return a < b ? 1 : a > b ? -1 : 0;
+    })
+    .map(function (date) {
+      const averages = {};
+      const devices = dailyAcc[date];
+      for (const id of Object.keys(devices)) {
+        const { sum, n } = devices[id];
+        averages[id] = Math.round((sum / n) * 100) / 100;
+      }
+      return { date, averages };
+    });
+}
+
+// Dernières valeurs connues
 app.get('/temperatures', function (req, res) {
   res.json(sensorsState);
+});
+
+// Historique: ?range=1h|1d|1w|1m|3m  OU  ?days=N
+// deviceId=id  |  deviceId=id1,id2  |  deviceId=all
+app.get('/temperatures/history', async function (req, res) {
+  const window = resolveHistoryWindow(req);
+  if (window.error) return res.status(400).json({ error: window.error });
+
+  const deviceFilter = parseDeviceFilter(req);
+  const to = Date.now();
+  const from = to - window.rangeMs;
+
+  try {
+    const { byDevice, dailyAcc } = await readHistoryBundle(deviceFilter, from);
+    const series = {};
+    for (const id of Object.keys(byDevice)) {
+      series[id] = downsamplePoints(byDevice[id], HISTORY_MAX_POINTS);
+    }
+    res.json({
+      range: window.label,
+      days: window.days,
+      from: new Date(from).toISOString(),
+      to: new Date(to).toISOString(),
+      series,
+      daily: buildDailyRows(dailyAcc)
+    });
+  } catch (e) {
+    console.error('[SENSOR] history read error:', e && e.message ? e.message : e);
+    res.status(500).json({ error: e && e.message ? e.message : 'history read failed' });
+  }
 });
 
 // Unified command endpoints

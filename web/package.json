@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "chart.js": "latest",
+    "chartjs-plugin-zoom": "^2.2.0",
+    "hammerjs": "^2.0.8",
     "svelte": "latest"
   },
   "devDependencies": {
@@ -17,4 +19,3 @@
     "vite": "latest"
   }
 }
-
