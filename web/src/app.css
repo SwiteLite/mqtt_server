@@ -1,7 +1,7 @@
 :root {
   color-scheme: dark;
   --bg: #0b1220;
-  --panel: rgba(255, 255, 255, 0.06);
+  --panel: #121a2b;
   --text: #e8eefc;
   --muted: rgba(232, 238, 252, 0.7);
   --border: rgba(255, 255, 255, 0.12);
@@ -15,101 +15,84 @@ body {
 
 body {
   margin: 0;
-  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-  background: radial-gradient(1200px 800px at 10% 10%, rgba(102, 204, 255, 0.18), transparent 55%),
-    radial-gradient(1000px 700px at 90% 20%, rgba(255, 102, 204, 0.12), transparent 60%),
-    var(--bg);
+  font-family: system-ui, Segoe UI, sans-serif;
+  background: var(--bg);
   color: var(--text);
-}
-
-a {
-  color: inherit;
 }
 
 .container {
   max-width: 1100px;
   margin: 0 auto;
-  padding: 28px 16px 40px;
+  padding: 20px 14px 36px;
 }
 
 .header {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
-}
-
-.title {
-  display: grid;
-  gap: 4px;
+  gap: 12px;
+  margin-bottom: 14px;
 }
 
 .title h1 {
   margin: 0;
-  font-size: 22px;
-  letter-spacing: 0.2px;
+  font-size: 20px;
 }
 
 .title .sub {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--muted);
 }
 
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 14px;
-  backdrop-filter: blur(10px);
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 14px;
-}
-
-@media (max-width: 980px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
+  border-radius: 10px;
+  padding: 12px;
 }
 
 .row {
   display: flex;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
 }
 
-select {
-  background: rgba(255, 255, 255, 0.06);
+select,
+.days-input,
+.btn,
+.range-btn {
+  background: #0f1726;
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 10px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.btn {
+  cursor: pointer;
+}
+
+.btn:disabled {
+  opacity: 0.6;
 }
 
 .pill {
   font-size: 12px;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
 }
 
-.pill strong {
-  color: var(--text);
-}
-
 .mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-family: ui-monospace, Consolas, monospace;
 }
 
 .muted {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .error {
@@ -118,66 +101,50 @@ select {
 
 .section-title {
   font-weight: 600;
-  margin-bottom: 12px;
-}
-
-.btn {
-  background: transparent;
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 12px;
-  cursor: pointer;
-}
-
-.btn:disabled {
-  opacity: 0.6;
-  cursor: default;
+  margin-bottom: 10px;
 }
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
 }
 
 .card {
   text-align: left;
-  background: rgba(255, 255, 255, 0.04);
+  background: #0f1726;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 14px;
+  border-radius: 10px;
+  padding: 12px;
   color: inherit;
   cursor: pointer;
 }
 
 .card.active {
   border-color: rgba(102, 204, 255, 0.55);
-  background: rgba(102, 204, 255, 0.1);
 }
 
 .card-id {
   font-size: 12px;
   color: var(--muted);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .card-value {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 650;
-  letter-spacing: 0.2px;
 }
 
 .card-value .unit {
-  font-size: 16px;
+  font-size: 14px;
   margin-left: 2px;
   color: var(--muted);
   font-weight: 500;
 }
 
 .card-meta {
-  margin-top: 8px;
-  font-size: 12px;
+  margin-top: 6px;
+  font-size: 11px;
 }
 
 .chart-toolbar {
@@ -185,36 +152,30 @@ select {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
-.range-group {
+.range-group,
+.chart-controls {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
 .range-btn {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-size: 12px;
   cursor: pointer;
+  color: var(--muted);
 }
 
 .range-btn.active {
   color: var(--text);
   border-color: rgba(102, 204, 255, 0.55);
-  background: rgba(102, 204, 255, 0.12);
 }
 
 .chart-wrap {
-  height: 360px;
-  position: relative;
-  min-height: 240px;
+  width: 100%;
+  min-height: 200px;
 }
 
 .chart-panel.fullscreen {
@@ -223,7 +184,7 @@ select {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background: #0b1220;
+  background: var(--bg);
 }
 
 .chart-panel.fullscreen .chart-wrap {
@@ -232,57 +193,38 @@ select {
 }
 
 .chart-hint {
-  margin: 0 0 10px;
-  font-size: 12px;
+  margin: 0 0 8px;
+  font-size: 11px;
 }
-
-.chart-controls {
-  gap: 12px;
-}
-
 
 .check {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 6px;
+  font-size: 12px;
   color: var(--muted);
   cursor: pointer;
-  user-select: none;
-}
-
-.check input {
-  accent-color: var(--accent);
-}
-
-.custom-days {
-  margin-left: 4px;
 }
 
 .days-input {
-  width: 72px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 6px 8px;
+  width: 64px;
 }
 
 .table-wrap {
   overflow: auto;
-  max-height: 420px;
+  max-height: 360px;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 th,
 td {
   text-align: left;
-  padding: 10px 10px;
+  padding: 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   white-space: nowrap;
 }
@@ -292,8 +234,16 @@ th {
   font-weight: 600;
   position: sticky;
   top: 0;
-  background: #101827;
-  z-index: 1;
+  background: #121a2b;
 }
 
+/* uPlot theme tweaks */
+.uplot,
+.uplot .u-legend {
+  font-family: system-ui, Segoe UI, sans-serif;
+  color: var(--text);
+}
 
+.uplot .u-legend .u-series th {
+  color: var(--muted);
+}

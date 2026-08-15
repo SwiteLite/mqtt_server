@@ -9,10 +9,8 @@
     "preview": "vite preview --host"
   },
   "dependencies": {
-    "chart.js": "latest",
-    "chartjs-plugin-zoom": "^2.2.0",
-    "hammerjs": "^2.0.8",
-    "svelte": "latest"
+    "svelte": "latest",
+    "uplot": "^1.6.31"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "latest",

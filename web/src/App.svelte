@@ -1,36 +1,29 @@
 <script>
-  import { onDestroy, onMount } from 'svelte';
-  import Chart from 'chart.js/auto';
-  import zoomPlugin from 'chartjs-plugin-zoom';
-
-  Chart.register(zoomPlugin);
+  import { onDestroy, onMount, tick } from 'svelte';
+  import uPlot from 'uplot';
+  import 'uplot/dist/uPlot.min.css';
 
   const RANGES = [
-    { id: '1h', label: '1 heure' },
-    { id: '1d', label: '1 jour' },
-    { id: '1w', label: '1 semaine' },
+    { id: '1h', label: '1 h' },
+    { id: '1d', label: '1 j' },
+    { id: '1w', label: '1 sem' },
     { id: '1m', label: '1 mois' },
     { id: '3m', label: '3 mois' }
   ];
 
-  const COLORS = [
-    { border: '#66ccff', fill: 'rgba(102, 204, 255, 0.12)' },
-    { border: '#ff99cc', fill: 'rgba(255, 153, 204, 0.12)' },
-    { border: '#9dffb0', fill: 'rgba(157, 255, 176, 0.10)' },
-    { border: '#ffd27a', fill: 'rgba(255, 210, 122, 0.12)' }
-  ];
+  const COLORS = ['#66ccff', '#ff99cc', '#9dffb0', '#ffd27a'];
 
   const CHART_SIZES = [
-    { id: 'm', label: 'M', height: 360 },
-    { id: 'l', label: 'L', height: 520 },
-    { id: 'xl', label: 'XL', height: 720 }
+    { id: 'm', label: 'M', height: 280 },
+    { id: 'l', label: 'L', height: 420 },
+    { id: 'xl', label: 'XL', height: 600 }
   ];
 
   /** @type {Record<string, { value: number, unit: string, lastUpdate: string }>} */
   let temps = {};
   let selectedId = '';
   let overlay = false;
-  let rangeMode = 'preset'; // preset | custom
+  let rangeMode = 'preset';
   let range = '1d';
   let customDays = 14;
   let error = '';
@@ -42,15 +35,13 @@
   let daily = [];
   let chartSize = 'm';
   let isFullscreen = false;
-  /** @type {'zoom' | 'pan'} */
-  let interactMode = 'zoom';
 
-  /** @type {HTMLCanvasElement | null} */
-  let canvas = null;
+  /** @type {HTMLElement | null} */
+  let chartEl = null;
   /** @type {HTMLElement | null} */
   let chartPanel = null;
-  /** @type {import('chart.js').Chart | null} */
-  let chart = null;
+  /** @type {uPlot | null} */
+  let plot = null;
 
   function deviceIds() {
     return Object.keys(temps).sort();
@@ -68,9 +59,11 @@
     return [...ids].sort();
   }
 
-  function chartHeight() {
-    if (isFullscreen) return '100%';
-    return `${CHART_SIZES.find((s) => s.id === chartSize)?.height || 360}px`;
+  function chartHeightPx() {
+    if (isFullscreen) {
+      return Math.max(240, (chartPanel?.clientHeight || 600) - 160);
+    }
+    return CHART_SIZES.find((s) => s.id === chartSize)?.height || 280;
   }
 
   function ensureSelected() {
@@ -94,15 +87,13 @@
     return new Date(y, m - 1, d).toLocaleDateString('fr-FR', {
       weekday: 'short',
       day: 'numeric',
-      month: 'long',
-      year: 'numeric'
+      month: 'short'
     });
   }
 
   function formatAxisLabel(t) {
     const d = new Date(t);
-    const shortTime =
-      rangeMode === 'preset' && (range === '1h' || range === '1d');
+    const shortTime = rangeMode === 'preset' && (range === '1h' || range === '1d');
     if (shortTime) {
       return d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
     }
@@ -117,64 +108,137 @@
     return seriesIds().reduce((n, id) => n + (series[id]?.length || 0), 0);
   }
 
-  function applyInteractMode() {
-    if (!chart?.options?.plugins?.zoom) return;
-    const zoom = chart.options.plugins.zoom;
-    const isZoom = interactMode === 'zoom';
-    zoom.zoom.drag.enabled = isZoom;
-    zoom.pan.enabled = !isZoom;
-    zoom.zoom.wheel.enabled = true;
-    zoom.zoom.pinch.enabled = true;
+  /** Aligne les séries sur un axe X commun (uPlot). */
+  function toUplotPayload() {
+    const ids = seriesIds();
+    if (!ids.length) {
+      return { ids: [], data: [[], []] };
+    }
+    if (ids.length === 1) {
+      const pts = series[ids[0]] || [];
+      return {
+        ids,
+        data: [pts.map((p) => p.t / 1000), pts.map((p) => p.v)]
+      };
+    }
+    const tSet = new Set();
+    for (const id of ids) {
+      for (const p of series[id] || []) tSet.add(p.t);
+    }
+    const ts = [...tSet].sort((a, b) => a - b);
+    const maps = ids.map((id) => new Map((series[id] || []).map((p) => [p.t, p.v])));
+    return {
+      ids,
+      data: [
+        ts.map((t) => t / 1000),
+        ...maps.map((m) => ts.map((t) => (m.has(t) ? m.get(t) : null)))
+      ]
+    };
   }
 
-  function updateChart({ resetZoom = true } = {}) {
-    if (!chart) return;
-    const ids = seriesIds();
-    chart.data.datasets = ids.map((id, i) => {
-      const c = COLORS[i % COLORS.length];
-      return {
-        label: id,
-        data: (series[id] || []).map((p) => ({ x: p.t, y: p.v })),
-        borderColor: c.border,
-        backgroundColor: c.fill,
-        fill: ids.length === 1,
-        pointRadius: 0,
-        tension: 0.2
-      };
-    });
-    chart.options.scales.x.ticks.callback = (v) => formatAxisLabel(v);
-    chart.update('none');
-    if (resetZoom && typeof chart.resetZoom === 'function') {
-      chart.resetZoom();
+  function buildOpts(ids, width, height) {
+    return {
+      width,
+      height,
+      pxAlign: false,
+      cursor: {
+        drag: { x: true, y: true, setScale: true }
+      },
+      legend: { show: true },
+      scales: {
+        x: { time: true }
+      },
+      axes: [
+        {
+          stroke: 'rgba(232,238,252,0.7)',
+          grid: { stroke: 'rgba(255,255,255,0.08)', width: 1 },
+          ticks: { stroke: 'rgba(255,255,255,0.12)' },
+          values: (_u, splits) => splits.map((s) => formatAxisLabel(s * 1000))
+        },
+        {
+          stroke: 'rgba(232,238,252,0.7)',
+          grid: { stroke: 'rgba(255,255,255,0.08)', width: 1 },
+          ticks: { stroke: 'rgba(255,255,255,0.12)' },
+          size: 50
+        }
+      ],
+      series: [
+        { label: 'Temps' },
+        ...ids.map((id, i) => ({
+          label: id,
+          stroke: COLORS[i % COLORS.length],
+          width: 1.5,
+          spanGaps: true,
+          points: { show: false }
+        }))
+      ]
+    };
+  }
+
+  function destroyPlot() {
+    plot?.destroy();
+    plot = null;
+  }
+
+  function renderPlot() {
+    if (!chartEl) return;
+    const { ids, data } = toUplotPayload();
+    const width = chartEl.clientWidth || 600;
+    const height = chartHeightPx();
+
+    if (!ids.length) {
+      destroyPlot();
+      chartEl.innerHTML = '';
+      return;
+    }
+
+    if (!plot) {
+      chartEl.innerHTML = '';
+      plot = new uPlot(buildOpts(ids, width, height), data, chartEl);
+      return;
+    }
+
+    // Recréer si le nombre de séries change (options series)
+    if (plot.series.length - 1 !== ids.length) {
+      destroyPlot();
+      chartEl.innerHTML = '';
+      plot = new uPlot(buildOpts(ids, width, height), data, chartEl);
+      return;
+    }
+
+    plot.setSize({ width, height });
+    plot.setData(data, true);
+  }
+
+  function resetZoom() {
+    if (!plot) return;
+    plot.setScale('x', { min: plot.data[0][0], max: plot.data[0][plot.data[0].length - 1] });
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (let s = 1; s < plot.data.length; s++) {
+      for (const v of plot.data[s]) {
+        if (v == null || !Number.isFinite(v)) continue;
+        if (v < yMin) yMin = v;
+        if (v > yMax) yMax = v;
+      }
+    }
+    if (Number.isFinite(yMin) && Number.isFinite(yMax)) {
+      const pad = Math.max(0.2, (yMax - yMin) * 0.08);
+      plot.setScale('y', { min: yMin - pad, max: yMax + pad });
     }
   }
 
-  function zoomBy(factor) {
-    if (chart && typeof chart.zoom === 'function') chart.zoom(factor);
-  }
-
-  function resetZoomView() {
-    if (chart && typeof chart.resetZoom === 'function') chart.resetZoom();
-  }
-
-  function setChartSize(id) {
+  async function setChartSize(id) {
     chartSize = id;
-    requestAnimationFrame(() => chart?.resize());
-  }
-
-  function setInteractMode(mode) {
-    interactMode = mode;
-    applyInteractMode();
+    await tick();
+    renderPlot();
   }
 
   async function toggleFullscreen() {
     if (!chartPanel) return;
     try {
-      if (!document.fullscreenElement) {
-        await chartPanel.requestFullscreen();
-      } else {
-        await document.exitFullscreen();
-      }
+      if (!document.fullscreenElement) await chartPanel.requestFullscreen();
+      else await document.exitFullscreen();
     } catch (e) {
       error = e && e.message ? e.message : String(e);
     }
@@ -182,7 +246,7 @@
 
   function onFullscreenChange() {
     isFullscreen = document.fullscreenElement === chartPanel;
-    requestAnimationFrame(() => chart?.resize());
+    requestAnimationFrame(() => renderPlot());
   }
 
   async function fetchCurrent() {
@@ -215,7 +279,7 @@
     if (!overlay && !selectedId) {
       series = {};
       daily = [];
-      updateChart();
+      renderPlot();
       return;
     }
     loadingHistory = true;
@@ -229,12 +293,13 @@
       const json = await res.json();
       series = json.series || {};
       daily = Array.isArray(json.daily) ? json.daily : [];
-      updateChart({ resetZoom: true });
+      await tick();
+      renderPlot();
     } catch (e) {
       error = e && e.message ? e.message : String(e);
       series = {};
       daily = [];
-      updateChart();
+      renderPlot();
     } finally {
       loadingHistory = false;
     }
@@ -264,85 +329,17 @@
 
   onMount(() => {
     document.addEventListener('fullscreenchange', onFullscreenChange);
-
-    const ctx = canvas?.getContext('2d');
-    if (ctx) {
-      chart = new Chart(ctx, {
-        type: 'line',
-        data: { datasets: [] },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: false,
-          parsing: false,
-          interaction: {
-            mode: 'nearest',
-            axis: 'x',
-            intersect: false
-          },
-          plugins: {
-            legend: { display: true },
-            tooltip: {
-              callbacks: {
-                title(items) {
-                  const x = items[0]?.parsed?.x;
-                  return typeof x === 'number' ? formatAxisLabel(x) : '';
-                }
-              }
-            },
-            zoom: {
-              limits: {
-                x: { min: 'original', max: 'original' },
-                y: { min: 'original', max: 'original' }
-              },
-              pan: {
-                enabled: false,
-                mode: 'xy'
-              },
-              zoom: {
-                wheel: { enabled: true, speed: 0.1 },
-                pinch: { enabled: true },
-                drag: {
-                  enabled: true,
-                  backgroundColor: 'rgba(102, 204, 255, 0.15)',
-                  borderColor: 'rgba(102, 204, 255, 0.6)',
-                  borderWidth: 1
-                },
-                mode: 'xy'
-              }
-            }
-          },
-          scales: {
-            x: {
-              type: 'linear',
-              ticks: {
-                maxTicksLimit: 8,
-                maxRotation: 0,
-                callback: (v) => formatAxisLabel(v)
-              }
-            },
-            y: {
-              title: { display: true, text: '°C' }
-            }
-          }
-        }
-      });
-
-      applyInteractMode();
-
-      canvas?.addEventListener('dblclick', (e) => {
-        e.preventDefault();
-        resetZoomView();
-      });
-    }
-
+    const onResize = () => renderPlot();
+    window.addEventListener('resize', onResize);
     refreshAll();
+    return () => {
+      window.removeEventListener('resize', onResize);
+    };
   });
 
   onDestroy(() => {
     document.removeEventListener('fullscreenchange', onFullscreenChange);
-    chart?.destroy();
-    chart = null;
+    destroyPlot();
   });
 </script>
 
@@ -350,7 +347,7 @@
   <div class="header">
     <div class="title">
       <h1>Températures</h1>
-      <div class="sub">Valeurs courantes et historique</div>
+      <div class="sub">Vue légère BeagleBone</div>
     </div>
     <button class="btn" on:click={refreshAll} disabled={loadingCurrent || loadingHistory}>
       {loadingCurrent || loadingHistory ? 'Chargement…' : 'Rafraîchir'}
@@ -391,7 +388,7 @@
       <div class="row">
         <label class="check">
           <input type="checkbox" bind:checked={overlay} on:change={fetchHistory} />
-          Superposer les capteurs
+          Superposer
         </label>
         {#if !overlay}
           <label class="row">
@@ -403,12 +400,12 @@
             </select>
           </label>
         {/if}
-        <span class="pill">{pointCount()} points</span>
+        <span class="pill">{pointCount()} pts</span>
       </div>
     </div>
 
-    <div class="row" style="margin-bottom: 12px;">
-      <div class="range-group" role="group" aria-label="Durée">
+    <div class="row" style="margin-bottom: 10px;">
+      <div class="range-group">
         {#each RANGES as r}
           <button
             type="button"
@@ -421,7 +418,6 @@
         {/each}
       </div>
       <label class="row custom-days">
-        <span class="muted">Personnalisé</span>
         <input
           class="days-input"
           type="number"
@@ -437,61 +433,30 @@
           class:active={rangeMode === 'custom'}
           on:click={applyCustomDays}
         >
-          Appliquer
+          OK
         </button>
       </label>
     </div>
 
-    <div class="row chart-controls" style="margin-bottom: 10px;">
-      <div class="range-group" role="group" aria-label="Interaction">
+    <div class="row chart-controls" style="margin-bottom: 8px;">
+      <button type="button" class="range-btn" on:click={resetZoom}>Reset zoom</button>
+      {#each CHART_SIZES as s}
         <button
           type="button"
           class="range-btn"
-          class:active={interactMode === 'zoom'}
-          on:click={() => setInteractMode('zoom')}
-          title="Glisser pour zoomer sur une zone"
+          class:active={!isFullscreen && chartSize === s.id}
+          on:click={() => setChartSize(s.id)}
         >
-          Zoom cadre
+          {s.label}
         </button>
-        <button
-          type="button"
-          class="range-btn"
-          class:active={interactMode === 'pan'}
-          on:click={() => setInteractMode('pan')}
-          title="Glisser pour déplacer la vue"
-        >
-          Déplacer
-        </button>
-      </div>
-      <div class="range-group" role="group" aria-label="Zoom">
-        <button type="button" class="range-btn" on:click={() => zoomBy(1.2)} title="Zoom avant">+</button>
-        <button type="button" class="range-btn" on:click={() => zoomBy(0.8)} title="Zoom arrière">−</button>
-        <button type="button" class="range-btn" on:click={resetZoomView} title="Double-clic aussi">Reset zoom</button>
-      </div>
-      <div class="range-group" role="group" aria-label="Taille">
-        {#each CHART_SIZES as s}
-          <button
-            type="button"
-            class="range-btn"
-            class:active={!isFullscreen && chartSize === s.id}
-            on:click={() => setChartSize(s.id)}
-          >
-            {s.label}
-          </button>
-        {/each}
-        <button type="button" class="range-btn" class:active={isFullscreen} on:click={toggleFullscreen}>
-          {isFullscreen ? 'Quitter plein écran' : 'Plein écran'}
-        </button>
-      </div>
+      {/each}
+      <button type="button" class="range-btn" class:active={isFullscreen} on:click={toggleFullscreen}>
+        {isFullscreen ? 'Quitter' : 'Plein écran'}
+      </button>
     </div>
 
-    <p class="chart-hint muted">
-      Molette : zoom · Mode Zoom cadre : sélectionner une zone · Mode Déplacer : glisser · Double-clic : reset
-    </p>
-
-    <div class="chart-wrap" style="height: {chartHeight()};">
-      <canvas bind:this={canvas}></canvas>
-    </div>
+    <p class="chart-hint muted">Glisser pour zoomer · Double-clic : reset</p>
+    <div class="chart-wrap" bind:this={chartEl}></div>
   </section>
 
   <section class="panel">

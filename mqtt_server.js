@@ -132,7 +132,7 @@ const RANGE_MS = {
   '1m': 30 * 24 * 60 * 60 * 1000,
   '3m': 90 * 24 * 60 * 60 * 1000
 };
-const HISTORY_MAX_POINTS = 720;
+const HISTORY_MAX_POINTS = 400;
 const HISTORY_MAX_DAYS = 366;
 
 function downsamplePoints(points, maxPoints) {
