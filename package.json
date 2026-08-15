@@ -1,0 +1,19 @@
+{
+  "name": "beaglebone-mqtt-broker",
+  "version": "1.0.0",
+  "description": "MQTT broker (Aedes) with simple HTTP API to publish messages",
+  "main": "mqtt_server.js",
+  "scripts": {
+    "start": "node mqtt_server.js",
+    "build:web": "npm run build --prefix web",
+    "dev:web": "npm run dev --prefix web"
+  },
+
+  "dependencies": {
+    "aedes": "^0.51.1",
+    "body-parser": "^1.20.3",
+    "express": "^4.19.2"
+  }
+}
+
+
