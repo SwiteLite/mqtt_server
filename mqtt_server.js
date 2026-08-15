@@ -306,12 +306,39 @@ function buildDailyRowsFromCache(fromMs, toMs, deviceFilter) {
   return rows;
 }
 
-app.get('/temperatures', function (req, res) {
-  res.json(sensorsState);
-});
+function readSensorsStateFromDisk() {
+  if (!fs.existsSync(sensorsStatePath)) return sensorsState;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sensorsStatePath, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      sensorsState = parsed;
+    }
+  } catch (e) {
+    console.error('[SENSOR] relecture sensors_state.json:', e.message);
+  }
+  return sensorsState;
+}
+
+function getCurrentSensors() {
+  if (!Object.keys(sensorsState).length) {
+    readSensorsStateFromDisk();
+  }
+  return sensorsState;
+}
+
+function sendCurrentSensors(req, res) {
+  res.set('Cache-Control', 'no-store');
+  const state = getCurrentSensors();
+  console.log(`[HTTP] GET ${req.path} → ${Object.keys(state).length} capteur(s)`);
+  res.json(state);
+}
+
+// API dédiée (évite le conflit avec le fallback SPA)
+app.get('/api/temps', sendCurrentSensors);
+app.get('/temperatures', sendCurrentSensors); // alias
 
 // Historique léger: lit seulement logs/history/YYYY-MM-DD.ndjson
-app.get('/temperatures/history', async function (req, res) {
+async function handleHistory(req, res) {
   const window = resolveHistoryWindow(req);
   if (window.error) return res.status(400).json({ error: window.error });
 
@@ -331,13 +358,18 @@ app.get('/temperatures/history', async function (req, res) {
       from: new Date(from).toISOString(),
       to: new Date(to).toISOString(),
       series,
-      daily: buildDailyRowsFromCache(from, to, deviceFilter)
+      daily: buildDailyRowsFromCache(from, to, null),
+      // Toujours inclure les valeurs courantes (cache mémoire)
+      current: getCurrentSensors()
     });
   } catch (e) {
     console.error('[SENSOR] history read error:', e && e.message ? e.message : e);
     res.status(500).json({ error: e && e.message ? e.message : 'history read failed' });
   }
-});
+}
+
+app.get('/api/temps/history', handleHistory);
+app.get('/temperatures/history', handleHistory);
 
 app.post('/message_cmd', function (req, res) {
   const body = req.body || {};
@@ -379,7 +411,10 @@ app.post('/conway_cmd', function (req, res) {
 const webDist = path.join(__dirname, 'web', 'dist');
 if (fs.existsSync(webDist)) {
   app.use(express.static(webDist));
-  app.get('*', function (req, res) {
+  app.get('*', function (req, res, next) {
+    if (req.path.startsWith('/api') || req.path.startsWith('/temperatures')) {
+      return next();
+    }
     res.sendFile(path.join(webDist, 'index.html'));
   });
   console.log(`[HTTP] serving web UI from ${webDist}`);
@@ -388,7 +423,9 @@ if (fs.existsSync(webDist)) {
 }
 
 const httpServer = app.listen(HTTP_PORT, '0.0.0.0', function () {
+  const n = Object.keys(sensorsState).length;
   console.log(`[HTTP] listening on 0.0.0.0:${HTTP_PORT}`);
+  console.log(`[SENSOR] cache courant: ${n} capteur(s) → ${Object.keys(sensorsState).join(', ') || '(vide)'}`);
 });
 httpServer.on('error', function (err) {
   if (err && err.code === 'EADDRINUSE') {

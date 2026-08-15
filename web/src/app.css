@@ -24,6 +24,72 @@ body {
   max-width: 1100px;
   margin: 0 auto;
   padding: 20px 14px 36px;
+  position: relative;
+}
+
+.container.is-busy {
+  cursor: wait;
+}
+
+.page.page-locked {
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.55;
+}
+
+.loading-lock {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 12, 22, 0.72);
+  cursor: wait;
+}
+
+.loading-card {
+  background: #121a2b;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 22px;
+  min-width: 240px;
+  text-align: center;
+}
+
+.loading-title {
+  font-weight: 600;
+  margin-top: 10px;
+}
+
+.loading-sub {
+  margin-top: 6px;
+  font-size: 12px;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.range-btn:disabled,
+.btn:disabled,
+select:disabled,
+.days-input:disabled,
+.card:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 .header {
@@ -197,6 +263,47 @@ select,
   font-size: 11px;
 }
 
+.hover-readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  min-height: 34px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0f1726;
+  font-size: 12px;
+}
+
+.hover-readout.empty {
+  color: var(--muted);
+}
+
+.hover-time {
+  color: var(--text);
+  padding-right: 8px;
+  border-right: 1px solid var(--border);
+}
+
+.hover-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.hover-item strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
 .check {
   display: inline-flex;
   align-items: center;
@@ -235,6 +342,14 @@ th {
   position: sticky;
   top: 0;
   background: #121a2b;
+}
+
+.th-sensor {
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 2px;
 }
 
 /* uPlot theme tweaks */

@@ -21,6 +21,8 @@
 
   /** @type {Record<string, { value: number, unit: string, lastUpdate: string }>} */
   let temps = {};
+  /** @type {[string, { value: number, unit: string, lastUpdate: string }][]} */
+  let tempEntries = [];
   let selectedId = '';
   let overlay = false;
   let rangeMode = 'preset';
@@ -29,34 +31,48 @@
   let error = '';
   let loadingCurrent = false;
   let loadingHistory = false;
+  // Verrouillage UI seulement pendant le chargement du graphe (lourd)
+  $: busy = loadingHistory;
   /** @type {Record<string, { t: number, v: number }[]>} */
   let series = {};
   /** @type {{ date: string, averages: Record<string, number> }[]} */
   let daily = [];
+  /** @type {string[]} colonnes fixes du tableau (tous les capteurs) */
+  let dailyCols = [];
   let chartSize = 'm';
   let isFullscreen = false;
+
+  function applyTemps(data) {
+    temps = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    tempEntries = Object.keys(temps)
+      .sort()
+      .map((id) => [id, temps[id]]);
+    ensureSelected();
+  }
+
+  function deviceIds() {
+    return tempEntries.map(([id]) => id);
+  }
 
   /** @type {HTMLElement | null} */
   let chartEl = null;
   /** @type {HTMLElement | null} */
   let chartPanel = null;
+  /** @type {HTMLElement | null} */
+  let hoverEl = null;
   /** @type {uPlot | null} */
   let plot = null;
-
-  function deviceIds() {
-    return Object.keys(temps).sort();
-  }
+  /** ids courants du graphe (pour le readout curseur) */
+  let plotIds = [];
 
   function seriesIds() {
     return Object.keys(series).sort();
   }
 
-  function dailyDeviceCols() {
-    const ids = new Set();
-    for (const row of daily) {
-      for (const id of Object.keys(row.averages || {})) ids.add(id);
-    }
-    return [...ids].sort();
+  function formatTemp(v) {
+    if (v === null || v === undefined || v === '') return '—';
+    const n = Number(v);
+    return Number.isFinite(n) ? n.toFixed(2) : String(v);
   }
 
   function chartHeightPx() {
@@ -108,7 +124,28 @@
     return seriesIds().reduce((n, id) => n + (series[id]?.length || 0), 0);
   }
 
-  /** Aligne les séries sur un axe X commun (uPlot). */
+  function nearestValue(pts, t, maxGapMs) {
+    if (!pts.length) return null;
+    let lo = 0;
+    let hi = pts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[mid].t < t) lo = mid + 1;
+      else hi = mid;
+    }
+    let best = pts[lo];
+    let bestDist = Math.abs(best.t - t);
+    if (lo > 0) {
+      const d = Math.abs(pts[lo - 1].t - t);
+      if (d < bestDist) {
+        best = pts[lo - 1];
+        bestDist = d;
+      }
+    }
+    return bestDist <= maxGapMs ? best.v : null;
+  }
+
+  /** Aligne les séries sur une grille temporelle régulière (curseur propre en superposition). */
   function toUplotPayload() {
     const ids = seriesIds();
     if (!ids.length) {
@@ -121,19 +158,73 @@
         data: [pts.map((p) => p.t / 1000), pts.map((p) => p.v)]
       };
     }
-    const tSet = new Set();
+
+    /** @type {Record<string, { t: number, v: number }[]>} */
+    const sorted = {};
+    let tMin = Infinity;
+    let tMax = -Infinity;
     for (const id of ids) {
-      for (const p of series[id] || []) tSet.add(p.t);
+      const pts = (series[id] || []).slice().sort((a, b) => a.t - b.t);
+      sorted[id] = pts;
+      if (pts.length) {
+        if (pts[0].t < tMin) tMin = pts[0].t;
+        if (pts[pts.length - 1].t > tMax) tMax = pts[pts.length - 1].t;
+      }
     }
-    const ts = [...tSet].sort((a, b) => a - b);
-    const maps = ids.map((id) => new Map((series[id] || []).map((p) => [p.t, p.v])));
+    if (!Number.isFinite(tMin) || !Number.isFinite(tMax) || tMax <= tMin) {
+      return { ids: [], data: [[], []] };
+    }
+
+    const targetPoints = 300;
+    const n = Math.max(2, Math.min(targetPoints, Math.round((tMax - tMin) / 30000) + 1));
+    const step = (tMax - tMin) / (n - 1);
+    // Important: maxGap >= step sinon trous sur 1 mois / 3 mois
+    const maxGap = Math.max(step, 5 * 60 * 1000);
+    const ts = Array.from({ length: n }, (_, i) => tMin + i * step);
+
     return {
       ids,
       data: [
         ts.map((t) => t / 1000),
-        ...maps.map((m) => ts.map((t) => (m.has(t) ? m.get(t) : null)))
+        ...ids.map((id) => ts.map((t) => nearestValue(sorted[id], t, maxGap)))
       ]
     };
+  }
+
+  function formatHoverValue(v) {
+    if (v == null || !Number.isFinite(v)) return '—';
+    return `${Number(v).toFixed(2)} °C`;
+  }
+
+  function clearHoverReadout() {
+    if (!hoverEl) return;
+    hoverEl.classList.add('empty');
+    hoverEl.innerHTML =
+      '<span class="muted">Passe le curseur sur le graphe pour voir l’heure et les températures.</span>';
+  }
+
+  function paintHoverReadout(u) {
+    if (!hoverEl) return;
+    const idx = u.cursor.idx;
+    if (idx == null || idx < 0 || !u.data?.[0] || u.data[0][idx] == null) {
+      clearHoverReadout();
+      return;
+    }
+    const timeLabel = formatAxisLabel(u.data[0][idx] * 1000);
+    const parts = [
+      `<span class="hover-time mono">${timeLabel}</span>`
+    ];
+    for (let i = 0; i < plotIds.length; i++) {
+      const id = plotIds[i];
+      const color = COLORS[i % COLORS.length];
+      const v = u.data[i + 1]?.[idx];
+      parts.push(
+        `<span class="hover-item"><span class="swatch" style="background:${color}"></span>` +
+          `<span class="mono">${id}</span><strong>${formatHoverValue(v)}</strong></span>`
+      );
+    }
+    hoverEl.classList.remove('empty');
+    hoverEl.innerHTML = parts.join('');
   }
 
   function buildOpts(ids, width, height) {
@@ -141,10 +232,11 @@
       width,
       height,
       pxAlign: false,
+      legend: { show: false },
       cursor: {
         drag: { x: true, y: true, setScale: true }
+        // ne pas mettre points.show: true — uPlot attend une fn qui renvoie un DOM node
       },
-      legend: { show: true },
       scales: {
         x: { time: true }
       },
@@ -153,7 +245,8 @@
           stroke: 'rgba(232,238,252,0.7)',
           grid: { stroke: 'rgba(255,255,255,0.08)', width: 1 },
           ticks: { stroke: 'rgba(255,255,255,0.12)' },
-          values: (_u, splits) => splits.map((s) => formatAxisLabel(s * 1000))
+          values: (_u, splits) => splits.map((s) => formatAxisLabel(s * 1000)),
+          space: 60
         },
         {
           stroke: 'rgba(232,238,252,0.7)',
@@ -171,13 +264,18 @@
           spanGaps: true,
           points: { show: false }
         }))
-      ]
+      ],
+      hooks: {
+        setCursor: [paintHoverReadout]
+      }
     };
   }
 
   function destroyPlot() {
     plot?.destroy();
     plot = null;
+    plotIds = [];
+    clearHoverReadout();
   }
 
   function renderPlot() {
@@ -185,6 +283,7 @@
     const { ids, data } = toUplotPayload();
     const width = chartEl.clientWidth || 600;
     const height = chartHeightPx();
+    plotIds = ids;
 
     if (!ids.length) {
       destroyPlot();
@@ -202,6 +301,7 @@
     if (plot.series.length - 1 !== ids.length) {
       destroyPlot();
       chartEl.innerHTML = '';
+      plotIds = ids;
       plot = new uPlot(buildOpts(ids, width, height), data, chartEl);
       return;
     }
@@ -252,11 +352,16 @@
   async function fetchCurrent() {
     loadingCurrent = true;
     try {
-      error = '';
-      const res = await fetch('/temperatures', { cache: 'no-store' });
+      const res = await fetch('/api/temps', { cache: 'no-store' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      temps = (await res.json()) || {};
-      ensureSelected();
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('application/json')) {
+        throw new Error('Réponse non-JSON pour /api/temps (mauvais serveur / vieux dist ?)');
+      }
+      applyTemps(await res.json());
+      if (!tempEntries.length) {
+        error = 'Cache courant vide (sensors_state.json / MQTT)';
+      }
     } catch (e) {
       error = e && e.message ? e.message : String(e);
     } finally {
@@ -276,52 +381,70 @@
   }
 
   async function fetchHistory() {
+    if (loadingHistory) return;
     if (!overlay && !selectedId) {
       series = {};
       daily = [];
+      dailyCols = [];
       renderPlot();
       return;
     }
     loadingHistory = true;
     try {
       error = '';
-      const res = await fetch(`/temperatures/history?${historyQuery()}`, { cache: 'no-store' });
+      const res = await fetch(`/api/temps/history?${historyQuery()}`, { cache: 'no-store' });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error || `HTTP ${res.status}`);
       }
       const json = await res.json();
+      // Les courantes voyagent aussi avec l'historique
+      if (json.current) applyTemps(json.current);
       series = json.series || {};
       daily = Array.isArray(json.daily) ? json.daily : [];
+      const colSet = new Set();
+      for (const row of daily) {
+        for (const id of Object.keys(row.averages || {})) colSet.add(id);
+      }
+      dailyCols = [...colSet].sort();
       await tick();
       renderPlot();
     } catch (e) {
       error = e && e.message ? e.message : String(e);
       series = {};
       daily = [];
+      dailyCols = [];
       renderPlot();
     } finally {
       loadingHistory = false;
     }
   }
 
-  async function refreshAll() {
+  async function refreshCurrent() {
+    if (loadingCurrent) return;
+    await fetchCurrent();
+  }
+
+  async function boot() {
     await fetchCurrent();
     await fetchHistory();
   }
 
   function selectDevice(id) {
+    if (busy) return;
     selectedId = id;
     if (!overlay) fetchHistory();
   }
 
   function setRange(id) {
+    if (busy) return;
     rangeMode = 'preset';
     range = id;
     fetchHistory();
   }
 
   function applyCustomDays() {
+    if (busy) return;
     rangeMode = 'custom';
     customDays = Math.max(1, Math.min(366, Number(customDays) || 1));
     fetchHistory();
@@ -331,7 +454,7 @@
     document.addEventListener('fullscreenchange', onFullscreenChange);
     const onResize = () => renderPlot();
     window.addEventListener('resize', onResize);
-    refreshAll();
+    boot();
     return () => {
       window.removeEventListener('resize', onResize);
     };
@@ -343,14 +466,25 @@
   });
 </script>
 
-<div class="container">
+<div class="container" class:is-busy={busy} aria-busy={busy}>
+  {#if busy}
+    <div class="loading-lock" role="alertdialog" aria-live="assertive" aria-label="Chargement en cours">
+      <div class="loading-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <div class="loading-title">Chargement des données…</div>
+        <div class="loading-sub muted">Patiente un instant, l’interface est verrouillée.</div>
+      </div>
+    </div>
+  {/if}
+
+  <div class="page" class:page-locked={busy}>
   <div class="header">
     <div class="title">
       <h1>Températures</h1>
       <div class="sub">Vue légère BeagleBone</div>
     </div>
-    <button class="btn" on:click={refreshAll} disabled={loadingCurrent || loadingHistory}>
-      {loadingCurrent || loadingHistory ? 'Chargement…' : 'Rafraîchir'}
+    <button class="btn" on:click={refreshCurrent} disabled={loadingCurrent || busy}>
+      {loadingCurrent ? 'Actualisation…' : 'Rafraîchir courantes'}
     </button>
   </div>
 
@@ -360,11 +494,11 @@
 
   <section class="panel" style="margin-bottom: 14px;">
     <div class="section-title">Température courante</div>
-    {#if deviceIds().length === 0}
+    {#if tempEntries.length === 0}
       <div class="muted">Aucun capteur pour le moment.</div>
     {:else}
       <div class="cards">
-        {#each deviceIds() as id}
+        {#each tempEntries as [id, reading]}
           <button
             type="button"
             class="card"
@@ -373,9 +507,9 @@
           >
             <div class="card-id mono">{id}</div>
             <div class="card-value">
-              {temps[id]?.value}<span class="unit">°{temps[id]?.unit || 'C'}</span>
+              {formatTemp(reading?.value)}<span class="unit">°{reading?.unit || 'C'}</span>
             </div>
-            <div class="card-meta muted">{formatCurrent(temps[id]?.lastUpdate)}</div>
+            <div class="card-meta muted">{formatCurrent(reading?.lastUpdate)}</div>
           </button>
         {/each}
       </div>
@@ -387,13 +521,13 @@
       <div class="section-title" style="margin: 0;">Évolution</div>
       <div class="row">
         <label class="check">
-          <input type="checkbox" bind:checked={overlay} on:change={fetchHistory} />
+          <input type="checkbox" bind:checked={overlay} on:change={fetchHistory} disabled={busy} />
           Superposer
         </label>
         {#if !overlay}
           <label class="row">
             <span class="muted">Capteur</span>
-            <select bind:value={selectedId} on:change={fetchHistory}>
+            <select bind:value={selectedId} on:change={fetchHistory} disabled={busy}>
               {#each deviceIds() as id}
                 <option value={id}>{id}</option>
               {/each}
@@ -411,6 +545,7 @@
             type="button"
             class="range-btn"
             class:active={rangeMode === 'preset' && range === r.id}
+            disabled={busy}
             on:click={() => setRange(r.id)}
           >
             {r.label}
@@ -424,6 +559,7 @@
           min="1"
           max="366"
           bind:value={customDays}
+          disabled={busy}
           on:keydown={(e) => e.key === 'Enter' && applyCustomDays()}
         />
         <span class="muted">jours</span>
@@ -431,6 +567,7 @@
           type="button"
           class="range-btn"
           class:active={rangeMode === 'custom'}
+          disabled={busy}
           on:click={applyCustomDays}
         >
           OK
@@ -439,28 +576,35 @@
     </div>
 
     <div class="row chart-controls" style="margin-bottom: 8px;">
-      <button type="button" class="range-btn" on:click={resetZoom}>Reset zoom</button>
+      <button type="button" class="range-btn" disabled={busy} on:click={resetZoom}>Reset zoom</button>
       {#each CHART_SIZES as s}
         <button
           type="button"
           class="range-btn"
           class:active={!isFullscreen && chartSize === s.id}
+          disabled={busy}
           on:click={() => setChartSize(s.id)}
         >
           {s.label}
         </button>
       {/each}
-      <button type="button" class="range-btn" class:active={isFullscreen} on:click={toggleFullscreen}>
+      <button type="button" class="range-btn" class:active={isFullscreen} disabled={busy} on:click={toggleFullscreen}>
         {isFullscreen ? 'Quitter' : 'Plein écran'}
       </button>
     </div>
 
-    <p class="chart-hint muted">Glisser pour zoomer · Double-clic : reset</p>
+    <p class="chart-hint muted">Glisser pour zoomer · Double-clic : reset · Survol : les 2 températures</p>
+    <div class="hover-readout empty" bind:this={hoverEl}>
+      <span class="muted">Passe le curseur sur le graphe pour voir l’heure et les températures.</span>
+    </div>
     <div class="chart-wrap" bind:this={chartEl}></div>
   </section>
 
   <section class="panel">
     <div class="section-title">Moyennes journalières</div>
+    <p class="muted" style="margin-top: -4px; margin-bottom: 10px;">
+      Une colonne par capteur (moyenne de toutes les mesures de la journée).
+    </p>
     {#if daily.length === 0}
       <div class="muted">Pas encore de données pour cette période.</div>
     {:else}
@@ -469,8 +613,11 @@
           <thead>
             <tr>
               <th>Jour</th>
-              {#each dailyDeviceCols() as id}
-                <th class="mono">{id}</th>
+              {#each dailyCols as id}
+                <th>
+                  <div class="th-sensor">Capteur</div>
+                  <div class="mono">{id}</div>
+                </th>
               {/each}
             </tr>
           </thead>
@@ -478,9 +625,9 @@
             {#each daily as row}
               <tr>
                 <td>{formatDayLabel(row.date)}</td>
-                {#each dailyDeviceCols() as id}
+                {#each dailyCols as id}
                   <td>
-                    {row.averages[id] !== undefined ? `${row.averages[id]} °C` : '—'}
+                    {row.averages[id] !== undefined ? `${formatTemp(row.averages[id])} °C` : '—'}
                   </td>
                 {/each}
               </tr>
@@ -490,4 +637,5 @@
       </div>
     {/if}
   </section>
+  </div>
 </div>
