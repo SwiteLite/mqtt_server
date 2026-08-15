@@ -1,20 +1,24 @@
 {
   "name": "beaglebone-mqtt-broker",
-  "version": "1.0.0",
-  "description": "MQTT broker (Aedes) with simple HTTP API to publish messages",
-  "main": "mqtt_server.js",
+  "version": "1.1.0",
+  "description": "MQTT broker (Aedes) + web app (cache températures) — 2 process PM2",
+  "main": "webapp.js",
   "scripts": {
-    "start": "node mqtt_server.js",
+    "start": "pm2 start ecosystem.config.cjs",
+    "stop": "pm2 stop ecosystem.config.cjs",
+    "restart": "pm2 restart ecosystem.config.cjs",
+    "logs": "pm2 logs",
+    "status": "pm2 status",
+    "broker": "node broker.js",
+    "web": "node webapp.js",
     "build:web": "npm run build --prefix web",
     "dev:web": "npm run dev --prefix web",
     "split-history": "node scripts/split_history.js"
   },
-
   "dependencies": {
     "aedes": "^0.51.1",
     "body-parser": "^1.20.3",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "mqtt": "^5.10.1"
   }
 }
-
-
