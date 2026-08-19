@@ -12,6 +12,7 @@
     "broker": "node broker.js",
     "web": "node webapp.js",
     "build:web": "npm run build --prefix web",
+    "release:web": "npm run build:web && git add web/dist",
     "dev:web": "npm run dev --prefix web",
     "split-history": "node scripts/split_history.js"
   },
