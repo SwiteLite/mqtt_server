@@ -59,6 +59,66 @@ mosquitto_pub -h localhost -t panel/mode -m "conway"
 mosquitto_pub -h localhost -t panel/speed -m "30"
 ```
 
+## Test en local (PC)
+
+Le front se build sur le PC (pas sur la BeagleBone). Pour vérifier le site et l’API avant déploiement :
+
+### Prérequis
+```bash
+npm install
+npm install --prefix web
+```
+
+### Mode dev (hot reload Svelte)
+
+Lancer **3 terminaux** à la racine du projet :
+
+```bash
+# Terminal 1 — broker MQTT
+node broker.js
+
+# Terminal 2 — API + cache températures + historique (lit logs/ local)
+node webapp.js
+
+# Terminal 3 — front Svelte (Vite)
+npm run dev:web
+```
+
+Ouvrir **http://localhost:5173** — Vite proxyfie `/temperatures` et `/api` vers le port 3000.
+
+### Mode prod local (comme sur la BeagleBone)
+
+```bash
+# Terminal 1
+node broker.js
+
+# Terminal 2 — sert web/dist sur le port 3000
+node webapp.js
+```
+
+Ouvrir **http://localhost:3000**. Rebuild le front si le code Svelte a changé :
+
+```bash
+npm run build:web
+```
+
+### Vérifications rapides
+
+```bash
+curl http://localhost:3000/temperatures
+curl "http://localhost:3000/temperatures/history?range=1d"
+```
+
+Sous PowerShell :
+
+```powershell
+(Invoke-WebRequest http://localhost:3000/temperatures -UseBasicParsing).Content
+(Invoke-WebRequest "http://localhost:3000/temperatures/history?range=1d" -UseBasicParsing).Content
+```
+
+- **Historique / graphiques** : fonctionnent si le dossier `logs/history/` est présent sur le PC.
+- **Températures live** : nécessitent des capteurs MQTT connectés au broker local (`127.0.0.1:1883`).
+
 ## 2) ESP32-S3: Afficheur + Client MQTT
 
 ### Code
@@ -72,7 +132,7 @@ mosquitto_pub -h localhost -t panel/speed -m "30"
 ### Paramétrage MQTT
 Dans `sketch_dec5b.ino`, configure l’IP du broker (BeagleBone):
 ```cpp
-const char* mqtt_server = "192.168.1.25"; // adresse IP de la BeagleBone
+const char* mqtt_server = "XX.XX.XX.XX"; // adresse IP de la BeagleBone
 const uint16_t mqtt_port = 1883;
 ```
 
@@ -85,7 +145,7 @@ Au changement de message via `panel/message`, le scroll repart du début.
 
 ## 3) Dépannage rapide
 - **Connexion réseau**:
-  - Ping la BeagleBone depuis le poste: `ping 192.168.1.25`
+  - Ping la BeagleBone depuis le poste: `ping XX.XX.XX.XX`
   - Vérifie le port broker: `ss -ltnp | grep 1883` (sur la BeagleBone)
   - Pare-feu: autoriser 1883/TCP et 3000/TCP si accès distant requis.
 - **Logs broker**: observe la console `npm start` pour connexions/publications.

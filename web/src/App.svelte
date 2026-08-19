@@ -505,7 +505,7 @@
       <div class="loading-card">
         <div class="spinner" aria-hidden="true"></div>
         <div class="loading-title">Chargement des données…</div>
-        <div class="loading-sub muted">Patiente un instant, l’interface est verrouillée.</div>
+        <div class="loading-sub muted">Veuillez patienter....</div>
       </div>
     </div>
   {/if}
@@ -514,7 +514,7 @@
   <div class="header">
     <div class="title">
       <h1>Températures</h1>
-      <div class="sub">Vue légère BeagleBone</div>
+      <div class="sub">Monitoring</div>
     </div>
     <button class="btn" on:click={refreshCurrent} disabled={loadingCurrent || busy}>
       {loadingCurrent ? 'Actualisation…' : 'Rafraîchir courantes'}
@@ -526,7 +526,7 @@
   {/if}
 
   <section class="panel" style="margin-bottom: 14px;">
-    <div class="section-title">Température courante</div>
+    <div class="section-title">Températures courantes</div>
     {#if tempEntries.length === 0}
       <div class="muted">Aucun capteur pour le moment.</div>
     {:else}
