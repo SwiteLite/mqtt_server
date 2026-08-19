@@ -119,6 +119,38 @@ Sous PowerShell :
 - **Historique / graphiques** : fonctionnent si le dossier `logs/history/` est présent sur le PC.
 - **Températures live** : nécessitent des capteurs MQTT connectés au broker local (`127.0.0.1:1883`).
 
+## Déploiement sur la BeagleBone
+
+La BeagleBone sert le front compilé (`web/dist`) — **ne pas lancer Vite ni `npm run build` dessus** (trop lourd). Tout build se fait sur le PC avant le push.
+
+### Sur le PC (avant chaque push)
+
+Si le code Svelte a changé, compiler et committer le résultat :
+
+```bash
+npm run build:web
+git add web/dist
+git commit -m "build: update web UI"
+git push
+```
+
+Raccourci (build + `git add web/dist`) :
+
+```bash
+npm run release:web
+git commit -m "build: update web UI"
+git push
+```
+
+### Sur la BeagleBone
+
+```bash
+cd ~/mqtt_server
+./deploy.sh
+```
+
+`deploy.sh` fait `git pull`, `npm install` et redémarre PM2. Le dossier `logs/` (historique capteurs) reste sur la machine et n’est pas écrasé.
+
 ## 2) ESP32-S3: Afficheur + Client MQTT
 
 ### Code
